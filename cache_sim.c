@@ -6,11 +6,13 @@
 
 typedef char byte;
 
+#define CACHE_SIZE 2
+
 struct cache {
     byte address; // This is the address in memory.
     byte value; // This is the value stored in cached memory.
-    // State for you to implement MESI protocol.
-    byte state;
+    // State for MESI protocol.
+    byte state; // 0: Invalid, 1: Modified, 2: Exclusive, 3: Shared
 };
 
 struct decoded_inst {
@@ -23,20 +25,14 @@ typedef struct cache cache;
 typedef struct decoded_inst decoded;
 
 
-/*
- * This is a very basic C cache simulator.
- * The input files for each "Core" must be named core_1.txt, core_2.txt, core_3.txt ... core_n.txt
- * Input files consist of the following instructions:
- * - RD <address>
- * - WR <address> <val>
- */
-
+// Global memory
 byte * memory;
+
 
 // Decode instruction lines
 decoded decode_inst_line(char * buffer){
     decoded inst;
-    char inst_type[2];
+    char inst_type[3];
     sscanf(buffer, "%s", inst_type);
     if(!strcmp(inst_type, "RD")){
         inst.type = 0;
@@ -63,15 +59,13 @@ void print_cachelines(cache * c, int cache_size){
     }
 }
 
-
 // This function implements the mock CPU loop that reads and writes data.
-void cpu_loop(int num_threads){
+void cpu_loop(int thread_num, char* input_file){
     // Initialize a CPU level cache that holds about 2 bytes of data.
-    int cache_size = 2;
-    cache * c = (cache *) malloc(sizeof(cache) * cache_size);
+    cache * c = (cache *) malloc(sizeof(cache) * CACHE_SIZE);
     
     // Read Input file
-    FILE * inst_file = fopen("input_0.txt", "r");
+    FILE * inst_file = fopen(input_file, "r");
     char inst_line[20];
     // Decode instructions and execute them.
     while (fgets(inst_line, sizeof(inst_line), inst_file)){
@@ -79,43 +73,73 @@ void cpu_loop(int num_threads){
         /*
          * Cache Replacement Algorithm
          */
-        int hash = inst.address%cache_size;
-        cache cacheline = *(c+hash);
-        /*
-         * This is where you will implement the coherancy check.
-         * For now, we will simply grab the latest data from memory.
-         */
-        if(cacheline.address != inst.address){
-            // Flush current cacheline to memory
-            *(memory + cacheline.address) = cacheline.value;
-            // Assign new cacheline
-            cacheline.address = inst.address;
-            cacheline.state = -1;
-            // This is where it reads value of the address from memory
-            cacheline.value = *(memory + inst.address);
-            if(inst.type == 1){
-                cacheline.value = inst.value;
-            }
-            *(c+hash) = cacheline;
+        int hash = inst.address % CACHE_SIZE;
+        cache cacheline = *(c + hash);
+        
+        // MESI protocol
+        switch (cacheline.state) {
+            case 0: // Invalid
+                cacheline.address = inst.address;
+                cacheline.state = 2; // Set state to Exclusive
+                cacheline.value = memory[inst.address];
+                break;
+            case 1: // Modified
+                memory[cacheline.address] = cacheline.value; // Write back to memory
+                // Fall through to Exclusive state
+            case 2: // Exclusive
+                if (cacheline.address != inst.address) {
+                    cacheline.address = inst.address;
+                    cacheline.state = 2; // Set state to Exclusive
+                    cacheline.value = memory[inst.address];
+                }
+                break;
+            case 3: // Shared
+                if (cacheline.address != inst.address) {
+                    cacheline.address = inst.address;
+                    cacheline.state = 2; // Set state to Exclusive
+                    cacheline.value = memory[inst.address];
+                }
+                break;
         }
         switch(inst.type){
-            case 0:
-                printf("Reading from address %d: %d\n", cacheline.address, cacheline.value);
+            case 0: // Read
+                printf("Thread %d: Reading from address %d: %d\n", thread_num, cacheline.address, cacheline.value);
                 break;
             
-            case 1:
-                printf("Writing to address %d: %d\n", cacheline.address, cacheline.value);
+            case 1: // Write
+                printf("Thread %d: Writing to address %d: %d\n", thread_num, cacheline.address, inst.value);
+                cacheline.value = inst.value; // Update cache value
+                cacheline.state = 1; // Set state to Modified
                 break;
         }
+        *(c + hash) = cacheline; // Update cache line
     }
     free(c);
+    fclose(inst_file);
 }
 
-int main(int c, char * argv[]){
+int main(int argc, char * argv[]){
+    // Check for correct usage
+    if (argc < 2) {
+        printf("Usage: %s <input_file_0> <input_file_1> ... <input_file_n>\n", argv[0]);
+        return 1;
+    }
+
     // Initialize Global memory
     // Let's assume the memory module holds about 24 bytes of data.
     int memory_size = 24;
     memory = (byte *) malloc(sizeof(byte) * memory_size);
-    cpu_loop(1);
+
+    // Parallelize CPU loop across multiple threads
+    #pragma omp parallel
+    {
+        int num_threads = omp_get_num_threads();
+        int thread_num = omp_get_thread_num();
+        if (thread_num < argc - 1) {
+            cpu_loop(thread_num, argv[thread_num + 1]);
+        }
+    }
+
     free(memory);
+    return 0;
 }
